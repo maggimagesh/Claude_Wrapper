@@ -26,7 +26,7 @@ WANT patch + reason
 ## Install
 
 ```bash
-npm install -g claudecode-wrapper
+npm i @magesh1211/claudecode-wrapper
 ```
 
 Requires Node 18+ and a working [Claude Code](https://claude.com/claude-code)
