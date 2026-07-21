@@ -1,0 +1,37 @@
+{
+  "name": "claudecode-wrapper",
+  "version": "0.1.0",
+  "description": "Terminal middleman for Claude Code: rewrites raw prompts into compressed caveman notation, forwards them to the local claude CLI, and reports real token savings.",
+  "type": "module",
+  "bin": {
+    "claudecode-wrapper": "bin/cli.js",
+    "cw": "bin/cli.js"
+  },
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./compress": "./src/compress.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test \"test/*.test.js\"",
+    "start": "node bin/cli.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "cli",
+    "prompt",
+    "prompt-compression",
+    "tokens",
+    "wrapper"
+  ],
+  "license": "MIT"
+}
