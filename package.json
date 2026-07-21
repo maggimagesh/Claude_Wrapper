@@ -1,6 +1,6 @@
 {
   "name": "claudecode-wrapper",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Terminal middleman for Claude Code: rewrites raw prompts into compressed caveman notation, forwards them to the local claude CLI, and reports real token savings.",
   "type": "module",
   "bin": {

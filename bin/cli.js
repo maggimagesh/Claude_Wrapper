@@ -8,14 +8,14 @@
  */
 
 import { parseArgs } from 'node:util';
-import { createInterface } from 'node:readline';
 import { compress } from '../src/compress.js';
 import { ask, inputTokens, pickLean } from '../src/claude.js';
 import { loadConfig, saveConfig, CONFIG_PATH } from '../src/config.js';
 import { estimateTokens } from '../src/tokens.js';
+import { startTui } from '../src/tui.js';
 import * as ui from '../src/render.js';
 
-const VERSION = '0.1.0';
+const VERSION = '1.0.0';
 
 const OPTIONS = {
   dry: { type: 'boolean', short: 'd' },
@@ -37,7 +37,7 @@ const OPTIONS = {
   'add-dir': { type: 'string', multiple: true },
   bin: { type: 'string' },
   config: { type: 'boolean' },
-  repl: { type: 'boolean', short: 'i' },
+  interactive: { type: 'boolean', short: 'i' },
   help: { type: 'boolean', short: 'h' },
   version: { type: 'boolean', short: 'v' },
 };
@@ -46,10 +46,10 @@ const HELP = `
 ${ui.bold('claudecode-wrapper')} -- compress prompts, then run them through Claude Code.
 
 ${ui.bold('USAGE')}
-  cw "<prompt>"              compress and send
-  cw                         read the prompt from stdin
-  cw -i                      interactive session
+  cw                         open the interactive session (Claude-Code style)
+  cw "<prompt>"              compress and send one prompt
   cw -d "<prompt>"           compress only, do not send
+  echo "<prompt>" | cw       read the prompt from stdin
 
 ${ui.bold('COMPRESSION')}
   -d, --dry            show the compressed prompt and exit
@@ -77,6 +77,7 @@ ${ui.bold('CLAUDE')}
       --bin <path>         path to the claude binary (default: claude)
 
 ${ui.bold('OTHER')}
+  -i, --interactive  force the interactive session
       --no-stats     hide the token savings line
       --config       write the current flags to ${CONFIG_PATH}
   -h, --help         this text
@@ -153,10 +154,20 @@ async function main() {
     passthrough,
   };
 
-  if (flags.repl) return repl(runOptions, flags);
-
   let raw = words.join(' ').trim();
   if (!raw && !process.stdin.isTTY) raw = (await readStdin()).trim();
+
+  // The interactive front-end is the default when there's nothing to do and a
+  // real terminal is attached: bare `cw`, or an explicit `cw -i`.
+  if (flags.interactive || (!raw && process.stdin.isTTY)) {
+    return startTui({
+      reply: settings.reply,
+      model: settings.model,
+      lean: settings.lean,
+      stats: settings.stats,
+      bin: settings.bin,
+    });
+  }
 
   if (!raw) {
     ui.err(ui.red('No prompt given.'));
@@ -217,35 +228,6 @@ async function run(raw, options, flags) {
   }
 
   return response;
-}
-
-/** Interactive session. Each turn continues the previous one. */
-async function repl(options, flags) {
-  ui.err(ui.bold('claudecode-wrapper') + ui.dim(' — prompts are compressed before sending. Ctrl-D to exit.'));
-
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  let sessionId = null;
-
-  for (;;) {
-    const line = await new Promise((resolve) => rl.question(ui.cyan('> '), resolve))
-      .catch(() => null);
-
-    if (line === null) break;
-    const raw = line.trim();
-    if (!raw) continue;
-    if (raw === 'exit' || raw === 'quit') break;
-
-    try {
-      const response = await run(raw, { ...options, resume: sessionId ?? options.resume }, flags);
-      if (response?.sessionId) sessionId = response.sessionId;
-    } catch (error) {
-      ui.err(ui.red(error.message));
-    }
-    ui.err('');
-  }
-
-  rl.close();
-  ui.err(ui.dim('bye'));
 }
 
 function readStdin() {

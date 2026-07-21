@@ -18,6 +18,10 @@ export const red = wrap(31, 39);
 export const green = wrap(32, 39);
 export const yellow = wrap(33, 39);
 export const cyan = wrap(36, 39);
+// Claude Code's accent is a warm orange; 256-colour 208 is the closest match.
+// The \x1b (ESC) prefix is required -- without it the terminal prints the code
+// as literal text instead of colouring.
+export const accent = (text) => (enabled ? `\x1b[38;5;208m${text}\x1b[39m` : text);
 
 export function out(text = '') {
   process.stdout.write(`${text}\n`);

@@ -35,16 +35,96 @@ install (`npm install -g @anthropic-ai/claude-code`).
 ## Usage
 
 ```bash
-cw "your prompt"          # compress and send
+cw                        # open the interactive session (default)
+cw "your prompt"          # compress and send one prompt
 cw -d "your prompt"       # dry run: show the compressed prompt, send nothing
 cw -s "your prompt"       # send, but print what was sent first
-cw -i                     # interactive session
-echo "prompt" | cw        # read from stdin
+echo "prompt" | cw        # read from stdin (for scripts/pipes)
 ```
 
 Both `claudecode-wrapper` and the shorter `cw` are installed.
 
 Run `cw --help` for the full flag list.
+
+## Interactive mode
+
+Running `cw` opens a Claude-Code-style CLI:
+
+```
+╭─────────────────────────────────────────────────────────────╮
+│ ✻ claudecode-wrapper · cut tokens for Claude Code           │
+│                                                             │
+│   Type naturally. Your prompt is compressed, sent to        │
+│   the claude CLI, and the reply comes back.                 │
+│                                                             │
+│   model default   reply terse   lean auto   compress on     │
+│   /help for commands  ·  Ctrl+C to exit                     │
+╰─────────────────────────────────────────────────────────────╯
+
+╭─────────────────────────────────────────────────────────────╮
+│ > fix the parser                                            │
+│   keep the public API intact                                │
+╰─────────────────────────────────────────────────────────────╯
+  Enter send · Alt+Enter newline · /help
+```
+
+It's a full line editor, not a single-line prompt:
+
+- **Multi-line input** — `Alt+Enter` (or a trailing `\` then Enter) inserts a
+  newline; a multi-line **paste** is kept intact instead of submitting each line.
+- **Editing** — arrow keys, `Home`/`End`, `Ctrl+A`/`Ctrl+E`, `Ctrl+U`/`Ctrl+K`
+  (kill to line start/end), `Ctrl+W` (delete word), `Ctrl+L` (clear screen).
+- **History** — `↑`/`↓` walk previous prompts (and move between lines when the
+  prompt spans several).
+- **Turns are threaded** — one persistent Claude Code session backs the whole
+  conversation, so context carries over without repeating it.
+
+Every turn prints a savings footer so you can watch the compression live.
+
+### Real tools, with permission prompts
+
+Interactive mode runs a full Claude Code session — Claude can read files, edit
+them, and run commands, streaming its activity as it goes:
+
+```
+❯ create a file note.txt containing hello
+I'll create the file.
+● Write(note.txt)
+  Allow this action?
+  ❯ Yes
+    Yes, and don't ask again for Write
+    No, tell Claude what to do differently
+  → allowed
+  ⎿ File created successfully at: note.txt
+```
+
+When Claude wants to use a tool that changes something, **the wrapper shows the
+same allow / allow-always / deny prompt Claude Code would**, and sends your
+choice back so Claude continues. Use `↑`/`↓` + `Enter`, or the `y` / `a` / `n`
+shortcuts. Read-only tools (Read, Grep, Glob, …) are auto-approved, and an
+"allow always" is remembered for the rest of the session — matching Claude
+Code's behaviour. Permission decisions are routed through a small MCP permission
+server over a private local socket; nothing leaves your machine.
+
+> **Token note:** to use tools, Claude Code must load its tool definitions
+> (~15k input tokens/turn), so lean mode does **not** apply in interactive mode —
+> the savings there come from prompt compression only. For cheap knowledge
+> questions, one-shot `cw "question"` still drops the tools and leans.
+
+### Slash commands
+
+| command                | what it does                                          |
+| ---------------------- | ----------------------------------------------------- |
+| `/help`                | list commands and key bindings                        |
+| `/lean [auto\|off]`    | drop tool definitions to cut ~80% of input tokens     |
+| `/raw`                 | toggle compression on/off (send your prompt verbatim) |
+| `/reply terse\|normal` | how Claude writes back                                |
+| `/model <name>`        | `opus`, `sonnet`, `haiku`, or a full model id         |
+| `/show`                | echo the compressed caveman prompt each turn          |
+| `/stats`               | toggle the savings footer                             |
+| `/new`                 | forget the current session and start fresh            |
+| `/clear`               | clear the screen                                      |
+| `/exit`                | quit                                                  |
 
 ## What it actually does
 
@@ -56,85 +136,90 @@ which is the half of the job that has nothing to do with token count.
 
 **2. Cuts tokens.** Two separate levers, and they are very different in size.
 
-## Honest numbers
+## With `cw` vs without: measured
 
-The headline goal for this tool was a 90% cut. Here is what is actually
-achievable, measured rather than estimated.
+The numbers below are real, not estimated — the same prompt sent straight to
+`claude -p` versus through `cw`, both counted from the input-token usage the
+`claude` CLI (v2.1.216) reported for the call.
 
-### Prompt compression: 25–70%
+| prompt (same both ways)                 | no `cw` | with `cw` | Δ tok | cost no `cw` | cost `cw` | answer |
+| --------------------------------------- | ------: | --------: | ----: | -----------: | --------: | ------ |
+| closures, in 3 sentences (knowledge)    |  15,598 |     3,110 |  −80% |      $0.0924 |   $0.0366 | same   |
+| `git rebase --onto`, 1 paragraph (repo) |  15,784 |    15,887 |   +1% |      $0.0759 |   $0.0969 | same   |
 
-Filler removal, stopword stripping, and abbreviation, measured across a sample
-of realistic prompts:
+Two prompts, two regimes — and the difference between them is the whole story.
 
-| prompt style | before | after | saved |
-|---|---:|---:|---:|
-| padded, polite bug report | 98 | 28 | 71% |
-| plain question | 51 | 22 | 57% |
-| review request | 57 | 25 | 56% |
-| feature request with constraints | 77 | 57 | 26% |
-| refactor with a pasted code block | 76 | 67 | 12% |
-| already terse (`fix login bug`) | 4 | 4 | 0% |
-| **overall** | **363** | **203** | **44%** |
+**When it wins big (knowledge questions):** the first prompt names no file, so
+`cw` classifies it as `EXPLAIN` and drops Claude's built-in tool definitions
+("lean mode"). Those schemas — not your words — are ~15k of the ~15.6k input
+tokens on a bare question. Remove them and the bill falls **80%**, for the same
+answer. Prompt compression contributes on top, but it is the smaller lever.
 
-Two hard ceilings. Code, paths, identifiers, and error strings are preserved
-byte-for-byte, so a prompt that is mostly code barely moves. And a prompt with
-no padding has nothing to remove — the wrapper correctly leaves it alone rather
-than inventing savings.
+**When it's roughly break-even (anything touching your repo):** the second
+prompt mentions a `--onto` flag, so `cw` conservatively keeps the tools (Claude
+might need them). With the 15k tool baseline unavoidable, compressing the prompt
+text saves only a few tokens, and the short protocol note `cw` appends can even
+tip it slightly higher. **The answer is the same; the cost is a wash.** This is
+the honest ceiling: a tool that claims a flat 90% on repo work is only measuring
+the part that was never expensive.
 
-### Lean mode: ~80%
+Result quality across both: **unchanged** — Claude decodes the caveman notation
+losslessly, and the terse register trims the reply without dropping substance.
+`cw` never made an answer worse in these runs; on the closures question the
+compressed run was actually a touch more complete, flagging the `var`/`let`
+binding gotcha.
 
-This is the lever that matters, and it is not about your words at all.
+### The prompt-compression lever on its own
 
-A trivial prompt sent through Claude Code costs about **15,400 input tokens** on
-this machine. The prompt itself is five of them. The rest is the system prompt
-and the built-in tool schemas. Compressing a 50-token prompt to 20 saves 30
-tokens out of 15,400 — around 0.2%.
+Independent of tools, the rewrite shrinks the prompt text itself. Measured on the
+compressor directly (deterministic, no API call):
 
-Dropping the tool definitions changes the picture:
+| your prompt                            |  before |   after |    saved |
+| -------------------------------------- | ------: | ------: | -------: |
+| polite bug report naming `src/auth.js` |      42 |      20 |     −52% |
+| refactor, keep the public API          |      37 |      23 |     −38% |
+| explain closures / scope chain         |      25 |      16 |     −36% |
+| add retry+backoff to `src/net.js`      |      37 |      30 |     −19% |
+| unit test for `parseConfig`            |      25 |      18 |     −28% |
+| **overall**                            | **166** | **107** | **−36%** |
 
-| | input tokens | cost |
-|---|---:|---:|
-| default | 15.7k | $0.081 |
-| lean | 2.9k | $0.046 |
+Code, paths, identifiers, flags, and error strings are preserved byte-for-byte,
+so a prompt that is mostly code barely moves — and an already-terse prompt is
+left alone rather than padded with invented savings.
 
-Same question, same answer quality: **82% fewer input tokens.**
+### Reading the stats line
 
-The catch is real: with tools disabled Claude cannot read files or run commands.
-So lean mode is applied **automatically only when it is safe** — for
-`EXPLAIN` / `ADVISE` / `PLAN` questions that name no file or path. Anything that
-might need to touch your repo keeps its tools. Force it either way with
-`--lean` / `--no-lean`.
-
-### So: is 90% real?
-
-For a padded, knowledge-only question — "hey, could you explain what a closure
-is, thanks!" — yes, roughly: ~80% from lean mode plus prompt compression on top,
-and terse replies cut output tokens too.
-
-For "fix the failing test in src/parser.js", no. That request needs the tools,
-and the tools are the bill. Expect 25–60% on the prompt text, which is a small
-slice of a large total. Any tool claiming a flat 90% on that second case is
-measuring only the part that was never expensive.
-
-The `·` stats line after each reply shows both figures, so you can see which
-case you are in:
+The `·` line after each reply shows both levers, so you always know which regime
+you're in:
 
 ```
 · prompt 33 -> 29 est tokens -12% | 2.9k in total | lean | $0.0456 | 11.4s
 ```
 
-`prompt` is estimated. `in total` and the cost are the real numbers Claude Code
-reported for that call.
+`prompt` is the estimated text compression; `in total`, `lean`, and the cost are
+the real figures the `claude` CLI reported for that call.
+
+### When lean applies
+
+Lean mode is automatic, but only when it's safe — with tools off, Claude can't
+read files or run commands, so a wrong guess is a broken answer, not a cheap one.
+It kicks in for `EXPLAIN` / `ADVISE` / `PLAN` questions that name no file, path,
+or flag; anything that might touch your repo keeps its tools. Override either way
+with `--lean` / `--no-lean`, or `/lean` in the session.
+
+> Interactive mode always needs tools, so lean doesn't apply there — the win in a
+> session comes from prompt compression alone. For cheap knowledge questions,
+> one-shot `cw "question"` is where the 80% lives.
 
 ## Caveman notation
 
-| slot | meaning |
-|---|---|
-| `DO` | the action: FIX, ADD, EXPLAIN, REFACTOR, TEST, REVIEW, FIND, OPTIMIZE, … |
-| `RE` | files and symbols in scope |
-| `CTX` | the situation, compressed |
-| `REQ` | hard constraints, prefixed `NO` / `MUST` / `ONLY` / `KEEP` |
-| `WANT` | expected deliverable |
+| slot   | meaning                                                                  |
+|--------|--------------------------------------------------------------------------|
+| `DO`   | the action: FIX, ADD, EXPLAIN, REFACTOR, TEST, REVIEW, FIND, OPTIMIZE, … |
+| `RE`   | files and symbols in scope                                               |
+| `CTX`  | the situation, compressed                                                |
+| `REQ`  | hard constraints, prefixed `NO` / `MUST` / `ONLY` / `KEEP`               |
+| `WANT` | expected deliverable                                                     |
 
 Short prompts skip the slots entirely and go out as a single line — the labels
 cost about eight tokens, which is not worth paying on a six-word request.
