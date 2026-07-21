@@ -1,5 +1,5 @@
 {
-  "name": "claudecode-wrapper",
+  "name": "@magesh1211/claudecode-wrapper",
   "version": "1.0.0",
   "description": "Terminal middleman for Claude Code: rewrites raw prompts into compressed caveman notation, forwards them to the local claude CLI, and reports real token savings.",
   "type": "module",
