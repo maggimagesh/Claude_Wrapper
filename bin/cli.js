@@ -8,6 +8,7 @@
  */
 
 import { parseArgs } from 'node:util';
+import { readFileSync } from 'node:fs';
 import { compress } from '../src/compress.js';
 import { ask, inputTokens, pickLean } from '../src/claude.js';
 import { loadConfig, saveConfig, CONFIG_PATH } from '../src/config.js';
@@ -16,7 +17,11 @@ import { startTui } from '../src/tui.js';
 import * as ui from '../src/render.js';
 import { renderMarkdown } from '../src/output.js';
 
-const VERSION = '1.0.0';
+// Read the version from package.json so the CLI can never drift from the
+// published version (npm version bumps package.json, not this file).
+const VERSION = JSON.parse(
+  readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+).version;
 
 const OPTIONS = {
   dry: { type: 'boolean', short: 'd' },
