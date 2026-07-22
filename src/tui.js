@@ -409,6 +409,29 @@ export function startTui(baseOptions = {}) {
         if (key.type === 'escape') { handleVimKey(key, editor, vim); return renderInput(); }
       }
 
+      // Enter while the autocomplete menu is open accepts the highlighted item
+      // instead of submitting the raw buffer. A slash command that takes no
+      // argument is accepted and run in one Enter; one that expects an argument
+      // is filled in so the user can type it. File mentions just get inserted.
+      if (key.type === 'enter' && !menuDismissed && menuItems.length) {
+        const item = menuItems[menuIndex];
+        if (item) {
+          if (menuKind === 'slash') {
+            if (item.arg) {
+              editor.setValue(`/${item.name} `);
+              menuDismissed = false;
+              renderInput();
+              return;
+            }
+            editor.setValue(`/${item.name}`);
+            menuItems = [];
+            return submit();
+          }
+          acceptMenu();
+          return;
+        }
+      }
+
       if (handleMenuKey(key)) return;
       // Any edit to the buffer un-dismisses the menu so it can reappear.
       if (key.type === 'text' || key.type === 'paste' || key.type === 'backspace') {
@@ -656,7 +679,9 @@ export function startTui(baseOptions = {}) {
       await new Promise((res) => {
         let child;
         try {
-          child = spawn('sh', ['-c', cmd], { cwd: process.cwd() });
+          // shell:true runs the line through the platform's own shell -- /bin/sh
+          // on Linux/macOS, cmd.exe on Windows -- so "!cmd" works everywhere.
+          child = spawn(cmd, { cwd: process.cwd(), shell: true });
         } catch (e) { emit(red(String(e.message)) + '\n'); return res(); }
         child.stdout.on('data', (d) => emit(d.toString()));
         child.stderr.on('data', (d) => emit(red(d.toString())));
@@ -982,7 +1007,7 @@ export function startTui(baseOptions = {}) {
         const hint = menuKind === 'slash' ? dim(c.hint ?? '') : '';
         out.push(clip('  ' + pointer + pad(label, 26) + hint, boxWidth()));
       }
-      const legend = menuKind === 'file' ? '  ↑↓ choose · Tab/⏎ insert · Esc dismiss' : '  ↑↓ choose · Tab complete · Esc dismiss';
+      const legend = menuKind === 'file' ? '  ↑↓ choose · Tab/⏎ insert · Esc dismiss' : '  ↑↓ choose · ⏎ run · Tab complete · Esc dismiss';
       out.push(dim(legend));
     }
 

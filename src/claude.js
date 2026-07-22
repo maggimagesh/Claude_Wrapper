@@ -10,7 +10,9 @@
  * and argv is world-readable in the process table.
  */
 
-import { spawn } from 'node:child_process';
+// cross-spawn launches the `claude` binary uniformly across platforms, including
+// the Windows `claude.cmd` shim that the stdlib spawn cannot run directly.
+import spawn from 'cross-spawn';
 import { once } from 'node:events';
 
 /**

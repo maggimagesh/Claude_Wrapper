@@ -31,8 +31,17 @@ const READ_ONLY = new Set([
 
 export class PermissionBroker {
   constructor() {
-    this.dir = mkdtempSync(join(tmpdir(), 'cwperm-'));
-    this.socketPath = join(this.dir, 'perm.sock');
+    // The wrapper and the MCP permission server talk over a local IPC channel.
+    // POSIX uses a Unix domain socket in a private temp dir; Windows has no
+    // Unix sockets, so we use a named pipe (the `\\.\pipe\...` namespace), which
+    // lives in the kernel and needs no on-disk file to create or clean up.
+    if (process.platform === 'win32') {
+      this.dir = null;
+      this.socketPath = `\\\\.\\pipe\\cwperm-${process.pid}-${Date.now()}`;
+    } else {
+      this.dir = mkdtempSync(join(tmpdir(), 'cwperm-'));
+      this.socketPath = join(this.dir, 'perm.sock');
+    }
     this.server = null;
     /** Per-session "always allow" grants, keyed by tool name. */
     this.always = new Set();
@@ -101,7 +110,11 @@ export class PermissionBroker {
 
   stop() {
     try { this.server?.close(); } catch {}
-    try { unlinkSync(this.socketPath); } catch {}
-    try { rmSync(this.dir, { recursive: true, force: true }); } catch {}
+    // Named pipes vanish with the server; only the POSIX socket has a temp dir
+    // and file on disk to remove.
+    if (this.dir) {
+      try { unlinkSync(this.socketPath); } catch {}
+      try { rmSync(this.dir, { recursive: true, force: true }); } catch {}
+    }
   }
 }

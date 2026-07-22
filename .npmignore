@@ -1,0 +1,19 @@
+# package.json's "files" whitelist (bin, src, README.md) is the primary guard
+# on what gets published -- this is a backstop in case that list ever drifts.
+
+test/
+node_modules/
+.git/
+.github/
+.claude/
+.vscode/
+.idea/
+
+*.log
+.env
+.env.*
+.DS_Store
+
+.gitignore
+.npmignore
+package-lock.json

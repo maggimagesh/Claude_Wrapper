@@ -9,6 +9,7 @@
 
 import { parseArgs } from 'node:util';
 import { readFileSync } from 'node:fs';
+import { sync as spawnSync } from 'cross-spawn';
 import { compress } from '../src/compress.js';
 import { ask, inputTokens, pickLean } from '../src/claude.js';
 import { loadConfig, saveConfig, CONFIG_PATH } from '../src/config.js';
@@ -17,11 +18,13 @@ import { startTui } from '../src/tui.js';
 import * as ui from '../src/render.js';
 import { renderMarkdown } from '../src/output.js';
 
-// Read the version from package.json so the CLI can never drift from the
-// published version (npm version bumps package.json, not this file).
-const VERSION = JSON.parse(
+// Read the name and version from package.json so the CLI can never drift from
+// the published package (npm version bumps package.json, not this file).
+const PKG = JSON.parse(
   readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
-).version;
+);
+const VERSION = PKG.version;
+const PKG_NAME = PKG.name;
 
 const OPTIONS = {
   dry: { type: 'boolean', short: 'd' },
@@ -43,6 +46,7 @@ const OPTIONS = {
   'add-dir': { type: 'string', multiple: true },
   bin: { type: 'string' },
   config: { type: 'boolean' },
+  uninstall: { type: 'boolean' },
   json: { type: 'boolean' },
   interactive: { type: 'boolean', short: 'i' },
   help: { type: 'boolean', short: 'h' },
@@ -87,6 +91,7 @@ ${ui.bold('OTHER')}
   -i, --interactive  force the interactive session
       --no-stats     hide the token savings line
       --config       write the current flags to ${CONFIG_PATH}
+      --uninstall    remove the global install (npm rm -g ${PKG_NAME})
   -h, --help         this text
   -v, --version      version
 
@@ -114,6 +119,7 @@ async function main() {
 
   if (flags.help) return ui.out(HELP);
   if (flags.version) return ui.out(`claudecode-wrapper ${VERSION}`);
+  if (flags.uninstall) return uninstall();
 
   const config = loadConfig();
 
@@ -254,6 +260,28 @@ async function run(raw, options, flags) {
   }
 
   return response;
+}
+
+/**
+ * Remove the global install. Works whether it was installed with `npm i -g`
+ * or `npm link` -- `npm rm -g <name>` unlinks both. Delegates to the real npm
+ * so it honours the user's global prefix, permissions, and package manager.
+ */
+function uninstall() {
+  ui.out(`Removing the global install of ${PKG_NAME} ...`);
+  // cross-spawn resolves `npm` to `npm.cmd` on Windows automatically.
+  const result = spawnSync('npm', ['rm', '-g', PKG_NAME], { stdio: 'inherit' });
+  if (result.error) {
+    ui.err(ui.red(`Could not run npm: ${result.error.message}`));
+    ui.err(`Uninstall manually with:  npm rm -g ${PKG_NAME}`);
+    process.exit(1);
+  }
+  if (result.status !== 0) {
+    ui.err(ui.red(`npm exited with code ${result.status}.`));
+    ui.err(`If it persists, try:  npm rm -g ${PKG_NAME}`);
+    process.exit(result.status ?? 1);
+  }
+  ui.out(ui.green('Uninstalled. The `cw` and `claudecode-wrapper` commands are gone.'));
 }
 
 function readStdin() {

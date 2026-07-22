@@ -25,12 +25,29 @@ WANT patch + reason
 
 ## Install
 
+Install it globally so the `cw` command is available anywhere:
+
 ```bash
-npm i @magesh1211/claudecode-wrapper
+npm i -g @magesh1211/claudecode-wrapper
 ```
 
-Requires Node 18+ and a working [Claude Code](https://claude.com/claude-code)
-install (`npm install -g @anthropic-ai/claude-code`).
+Works on **Linux, macOS, and Windows**. Requires Node 18+ and a working
+[Claude Code](https://claude.com/claude-code) install
+(`npm install -g @anthropic-ai/claude-code`). On Windows, run it from a modern
+terminal (Windows Terminal or PowerShell) so the interactive session renders
+correctly.
+
+### Uninstall
+
+```bash
+cw --uninstall            # removes the global install for you
+```
+
+or run npm directly:
+
+```bash
+npm rm -g @magesh1211/claudecode-wrapper
+```
 
 ## Usage
 

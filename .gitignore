@@ -1,0 +1,23 @@
+# Dependencies -- reinstalled from package-lock.json, never committed
+node_modules/
+
+# Logs
+npm-debug.log*
+*.log
+
+# Env / local secrets
+.env
+.env.*
+
+# Editor / OS cruft
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Coverage / test output
+coverage/
+.nyc_output/
+
+# This project's own runtime files
+.cw-memory.md

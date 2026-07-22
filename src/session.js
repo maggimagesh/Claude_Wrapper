@@ -15,7 +15,10 @@
  * here; the token win in interactive mode comes from prompt compression alone.
  */
 
-import { spawn } from 'node:child_process';
+// cross-spawn resolves the `claude` binary to its real executable on every
+// platform -- including the `claude.cmd` shim npm installs on Windows, which the
+// stdlib spawn cannot launch -- and escapes arguments correctly for cmd.exe.
+import spawn from 'cross-spawn';
 import { fileURLToPath } from 'node:url';
 import { PROTOCOL } from './claude.js';
 
