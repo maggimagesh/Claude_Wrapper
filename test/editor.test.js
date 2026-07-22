@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { LineEditor } from '../src/editor.js';
 import { decodeKeys } from '../src/term.js';
-import { layoutInput, handleSlash, renderBanner } from '../src/tui.js';
+import { layoutInput, handleSlash, renderBanner, filterSlashCommands, summariseResult } from '../src/tui.js';
 
 // --- editor: single line -----------------------------------------------------
 
@@ -101,6 +101,55 @@ test('arrow escape sequences decode', () => {
   assert.equal(decodeKeys(Buffer.from('\x1b[D'))[0].type, 'left');
 });
 
+test('Ctrl+Left / Ctrl+Right decode to word moves, not literal text', () => {
+  // ESC[1;5D and ESC[1;5C used to leak "1;5D"/"1;5C" into the buffer.
+  const left = decodeKeys(Buffer.from('\x1b[1;5D'));
+  assert.equal(left.length, 1);
+  assert.equal(left[0].type, 'word-left');
+  assert.equal(decodeKeys(Buffer.from('\x1b[1;5C'))[0].type, 'word-right');
+  // Alt+Arrow (mod 3) is treated the same way.
+  assert.equal(decodeKeys(Buffer.from('\x1b[1;3D'))[0].type, 'word-left');
+});
+
+test('Ctrl+Delete decodes to a forward word delete', () => {
+  assert.equal(decodeKeys(Buffer.from('\x1b[3;5~'))[0].type, 'delete-word');
+  // Plain Delete still decodes normally.
+  assert.equal(decodeKeys(Buffer.from('\x1b[3~'))[0].type, 'delete');
+});
+
+test('Ctrl+Backspace and Alt+Backspace delete the previous word', () => {
+  assert.equal(decodeKeys(Buffer.from('\x08'))[0].type, 'delete-word-back');
+  assert.equal(decodeKeys(Buffer.from('\x1b\x7f'))[0].type, 'delete-word-back');
+  // Plain Backspace (DEL) is unchanged.
+  assert.equal(decodeKeys(Buffer.from('\x7f'))[0].type, 'backspace');
+});
+
+test('Ctrl+Home / Ctrl+End jump to the document ends', () => {
+  assert.equal(decodeKeys(Buffer.from('\x1b[1;5H'))[0].type, 'doc-start');
+  assert.equal(decodeKeys(Buffer.from('\x1b[1;5F'))[0].type, 'doc-end');
+});
+
+// --- editor: word motions ----------------------------------------------------
+
+test('wordLeft / wordRight hop over whole words', () => {
+  const e = new LineEditor('the quick brown fox');
+  e.cursor = 19; // end
+  e.wordLeft();
+  assert.equal(e.cursor, 16); // start of "fox"
+  e.wordLeft();
+  assert.equal(e.cursor, 10); // start of "brown"
+  e.wordRight();
+  assert.equal(e.cursor, 15); // end of "brown"
+});
+
+test('deleteWordForward removes the word ahead of the cursor', () => {
+  const e = new LineEditor('the quick brown');
+  e.cursor = 0;
+  e.deleteWordForward();
+  assert.equal(e.value, ' quick brown');
+  assert.equal(e.cursor, 0);
+});
+
 test('Alt+Enter is the newline chord, distinct from Enter', () => {
   assert.equal(decodeKeys(Buffer.from('\x1b\r'))[0].type, 'alt-enter');
   assert.equal(decodeKeys(Buffer.from('\r'))[0].type, 'enter');
@@ -168,6 +217,40 @@ test('/reply validates its argument', () => {
 test('/exit signals exit; unknown commands do not', () => {
   assert.equal(handleSlash('/exit', {}).exit, true);
   assert.equal(handleSlash('/bogus', {}).exit, undefined);
+});
+
+// --- slash autocomplete ------------------------------------------------------
+
+test('filterSlashCommands matches by prefix', () => {
+  assert.deepEqual(filterSlashCommands('/l').map((c) => c.name), ['lean']);
+  const names = filterSlashCommands('/').map((c) => c.name);
+  assert.ok(names.includes('help') && names.includes('exit'));
+});
+
+test('filterSlashCommands hides once an argument is being typed', () => {
+  assert.deepEqual(filterSlashCommands('/model '), []);
+  assert.deepEqual(filterSlashCommands('/model opus'), []);
+  assert.deepEqual(filterSlashCommands('hello'), []);
+});
+
+// --- tool result summaries ---------------------------------------------------
+
+test('summariseResult collapses a Read to a line count, not file content', () => {
+  const file = '1\timport x\n2\tconst y = 1\n3\treturn y';
+  assert.equal(summariseResult('Read', file), 'Read 3 lines');
+  assert.equal(summariseResult('Read', 'only one line'), 'Read 1 line');
+  assert.equal(summariseResult('Read', ''), 'Read (empty file)');
+});
+
+test('summariseResult counts Grep/Glob hits', () => {
+  assert.equal(summariseResult('Grep', 'a\nb'), 'Found 2 lines');
+  assert.equal(summariseResult('Glob', 'one.ts'), 'Found 1 file');
+  assert.equal(summariseResult('Grep', ''), 'No matches');
+});
+
+test('summariseResult keeps a short first line for Bash and notes the rest', () => {
+  assert.equal(summariseResult('Bash', 'done'), 'done');
+  assert.equal(summariseResult('Bash', 'line1\nline2\nline3'), 'line1 (+2 more)');
 });
 
 test('the banner renders without color codes leaking width', () => {

@@ -14,6 +14,7 @@ import { loadConfig, saveConfig, CONFIG_PATH } from '../src/config.js';
 import { estimateTokens } from '../src/tokens.js';
 import { startTui } from '../src/tui.js';
 import * as ui from '../src/render.js';
+import { renderMarkdown } from '../src/output.js';
 
 const VERSION = '1.0.0';
 
@@ -37,6 +38,7 @@ const OPTIONS = {
   'add-dir': { type: 'string', multiple: true },
   bin: { type: 'string' },
   config: { type: 'boolean' },
+  json: { type: 'boolean' },
   interactive: { type: 'boolean', short: 'i' },
   help: { type: 'boolean', short: 'h' },
   version: { type: 'boolean', short: 'v' },
@@ -202,7 +204,7 @@ async function run(raw, options, flags) {
     ...options,
     lean,
     protocol: !flags.raw,
-    onDelta: options.stream
+    onDelta: (options.stream && !flags.json)
       ? (text) => {
           streamed = true;
           process.stdout.write(text);
@@ -210,10 +212,29 @@ async function run(raw, options, flags) {
       : undefined,
   });
 
+  // Machine-readable output for scripting and benchmarking: one JSON object
+  // with the answer alongside the real token/cost figures, nothing else.
+  if (flags.json) {
+    process.stdout.write(JSON.stringify({
+      answer: (response.text ?? '').trim(),
+      estBefore: result.before,
+      estAfter: result.after,
+      inputTokens: inputTokens(response.usage),
+      outputTokens: response.usage?.output_tokens ?? null,
+      cost: response.cost ?? null,
+      durationMs: response.durationMs ?? null,
+      lean,
+      compressed: !flags.raw,
+      prompt: result.prompt,
+    }) + '\n');
+    return response;
+  }
+
   if (streamed) {
     process.stdout.write('\n');
   } else if (response.text) {
-    ui.out(response.text.trim());
+    // Render the model's markdown to styled terminal text (plain when piped).
+    ui.out(renderMarkdown(response.text));
   }
 
   if (options.stats) {

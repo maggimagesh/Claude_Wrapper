@@ -86,8 +86,9 @@ function decodeControl(code) {
     case 0x0a: // LF
       return { type: 'enter' };
     case 0x7f:
-    case 0x08:
       return { type: 'backspace' };
+    case 0x08:
+      return { type: 'delete-word-back' };
     case 0x03:
       return { type: 'ctrl', key: 'c' };
     case 0x04:
@@ -104,6 +105,8 @@ function decodeControl(code) {
       return { type: 'ctrl', key: 'w' };
     case 0x0c:
       return { type: 'ctrl', key: 'l' };
+    case 0x12:
+      return { type: 'ctrl', key: 'r' };
     case 0x09:
       return { type: 'tab' };
     default:
@@ -119,29 +122,67 @@ function decodeEscape(s, i, keys) {
     return 2;
   }
 
+  // Alt+Backspace arrives as ESC + DEL/BS -- delete the previous word.
+  if (s[i + 1] === '\x7f' || s[i + 1] === '\x08') {
+    keys.push({ type: 'delete-word-back' });
+    return 2;
+  }
+
   if (s[i + 1] === '[' || s[i + 1] === 'O') {
     const rest = s.slice(i + 2);
-    const map = {
-      A: 'up', B: 'down', C: 'right', D: 'left',
-      H: 'home', F: 'end',
-    };
-    if (rest[0] in map) {
-      keys.push({ type: map[rest[0]] });
+
+    // Shift+Tab (back-tab) arrives as ESC[Z -- used to cycle permission modes.
+    if (rest[0] === 'Z') {
+      keys.push({ type: 'shift-tab' });
       return 3;
     }
-    // Numeric sequences like ESC[3~ (delete), ESC[1~ (home), ESC[4~ (end).
-    const m = rest.match(/^(\d+)~/);
+
+    // Letter-terminated keys: arrows and home/end. A modifier, when held,
+    // shows up as a "1;<mod>" prefix -- e.g. ESC[1;5D is Ctrl+Left, ESC[1;3C
+    // is Alt+Right. Plain ESC[D has no prefix.
+    let m = rest.match(/^(?:(\d+);(\d+))?([ABCDHF])/);
     if (m) {
-      const num = { 1: 'home', 3: 'delete', 4: 'end', 7: 'home', 8: 'end' }[m[1]];
-      keys.push({ type: num ?? 'unknown' });
+      const base = { A: 'up', B: 'down', C: 'right', D: 'left', H: 'home', F: 'end' }[m[3]];
+      keys.push({ type: applyModifier(base, m[2]) });
       return 2 + m[0].length;
     }
+
+    // Tilde-terminated keys carry the number first: ESC[3~ is Delete, and
+    // ESC[3;5~ is Ctrl+Delete. Home/end also appear as ESC[1~ / ESC[4~.
+    m = rest.match(/^(\d+)(?:;(\d+))?~/);
+    if (m) {
+      const base = { 1: 'home', 3: 'delete', 4: 'end', 7: 'home', 8: 'end' }[m[1]] ?? 'unknown';
+      keys.push({ type: applyModifier(base, m[2]) });
+      return 2 + m[0].length;
+    }
+
     return 2; // Unknown CSI: swallow the introducer.
   }
 
   // A lone ESC.
   keys.push({ type: 'escape' });
   return 1;
+}
+
+/**
+ * Fold a modifier code into a richer key type. The xterm modifier is a
+ * bitmask offset by one: (mod-1) has bit 1 = shift, bit 2 = alt, bit 4 = ctrl.
+ * Ctrl or Alt turns character moves into word moves and Delete into a word
+ * delete; Ctrl+Home/End jump to the ends of the buffer.
+ */
+function applyModifier(base, modStr) {
+  if (!modStr) return base;
+  const bits = Number(modStr) - 1;
+  const wordwise = (bits & 0b010) || (bits & 0b100); // alt or ctrl
+  if (!wordwise) return base;
+  switch (base) {
+    case 'left': return 'word-left';
+    case 'right': return 'word-right';
+    case 'delete': return 'delete-word';
+    case 'home': return 'doc-start';
+    case 'end': return 'doc-end';
+    default: return base;
+  }
 }
 
 /** Visible width of a string, ignoring ANSI escapes. */

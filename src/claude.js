@@ -33,14 +33,19 @@ export const PROTOCOL = [
 /** Reply-style directives, selected by --reply. */
 const REPLY_STYLES = {
   terse: [
-    'Answer in the same compressed register: no preamble, no restating the request,',
-    'no pleasantries, no summary of what you just did. Lead with the answer.',
-    'Prose only where it carries meaning. Never abbreviate code, identifiers, paths,',
-    'or commands -- those stay complete and correct.',
+    'Be as brief as correctness allows. Lead with the answer; no preamble, no',
+    'restating the request, no pleasantries, no closing summary of what you did.',
+    'Prefer short bullets over paragraphs; use prose only where it adds meaning.',
+    'Summarise actions in 1-3 lines by default; expand only if the user asks or',
+    'something failed. Do not repeat file paths, commands, code, or diffs already',
+    'shown in the terminal. Never abbreviate code, identifiers, paths, or commands,',
+    'and never drop an error, caveat, or required warning -- brevity trims fluff,',
+    'not information.',
   ].join(' '),
   normal: [
-    'Answer in normal, complete English prose. Be concise but do not compress your',
-    'reply -- the compression applies to the input only.',
+    'Answer in complete English prose. Be concise and lead with the answer, but do',
+    'not compress the reply -- the compression applies to the input only. Still omit',
+    'filler and do not restate paths, commands, or diffs already visible.',
   ].join(' '),
 };
 

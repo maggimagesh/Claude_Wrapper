@@ -21,6 +21,12 @@ import { decodeKeys, cursor, screen, bracketedPaste, visibleWidth } from './term
 import {
   dim, bold, red, green, yellow, cyan, accent,
 } from './render.js';
+import { renderMarkdown } from './output.js';
+import { createVim, handleVimKey } from './vim.js';
+import { completePath, pathTokenAt } from './complete.js';
+import { spawn } from 'node:child_process';
+import { appendFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 
 /** Banner shown once at startup. */
@@ -32,16 +38,53 @@ export function renderBanner(state) {
 
   const lines = [
     rule('╭', '╮'),
-    line(`${accent('✻')} ${bold('claudecode-wrapper')}  ${dim('· A wrapper for Claude Code to reduce Token consumption')}`),
+    line(`${accent('✻')}  ${bold('claudecode-wrapper')}   ${dim('· token-saving front-end for Claude Code')}`),
     line(),
-    line(dim('Type naturally. Your prompt is compressed, sent to the local')),
-    line(dim('claude CLI, and the reply comes back. No API key needed.')),
-    line(),
-    line(`${dim('model')} ${state.model ?? 'default'}   ${dim('reply')} ${state.reply}   ${dim('lean')} ${leanLabel(state.lean)}   ${dim('compress')} ${state.raw ? red('off') : green('on')}`),
-    line(`${dim('/help for commands  ·  Ctrl+C to exit')}`),
+    line(dim('Type naturally — your prompt is compressed, sent to the')),
+    line(dim('local claude CLI, and the reply streams back. No API key needed.')),
+    rule('├', '┤'),
+    line(`${badge('model', state.model ?? 'default')}   ${badge('reply', state.reply)}   ${badge('lean', leanLabel(state.lean))}   ${badge('compress', state.raw ? red('off') : green('on'))}`),
+    line(dim('/help for commands   ·   / to browse them   ·   Ctrl+C to exit')),
     rule('╰', '╯'),
   ];
   return lines.join('\n');
+}
+
+/** A "label value" chip used in the banner and status line. */
+function badge(label, value) {
+  return `${dim(label)} ${value}`;
+}
+
+/**
+ * The full slash-command catalogue. Drives both the interactive autocomplete
+ * menu and /help, so the two never drift. `arg` is a usage hint shown in the
+ * menu; it is purely cosmetic.
+ */
+export const SLASH_COMMANDS = [
+  { name: 'help', hint: 'show commands and shortcuts' },
+  { name: 'model', arg: '<name>', hint: 'opus, sonnet, haiku, or a full id' },
+  { name: 'reply', arg: 'terse|normal', hint: 'how Claude writes back' },
+  { name: 'lean', arg: '[auto|off]', hint: 'drop tool defs to cut input tokens' },
+  { name: 'raw', hint: 'toggle prompt compression on/off' },
+  { name: 'vim', hint: 'toggle vim keybindings' },
+  { name: 'show', hint: 'echo the compressed prompt each turn' },
+  { name: 'stats', hint: 'toggle the savings footer' },
+  { name: 'new', hint: 'start a fresh session' },
+  { name: 'clear', hint: 'clear the screen' },
+  { name: 'exit', hint: 'quit the session' },
+];
+
+/**
+ * Commands whose typed prefix matches `input`. Empty once the user starts
+ * typing an argument (a space after the command), so the menu gets out of the
+ * way. Pure, for testing.
+ */
+export function filterSlashCommands(input) {
+  if (!input.startsWith('/')) return [];
+  const rest = input.slice(1);
+  if (/\s/.test(rest)) return []; // typing an argument -- hide the menu
+  const q = rest.toLowerCase();
+  return SLASH_COMMANDS.filter((c) => c.name.startsWith(q));
 }
 
 /**
@@ -75,6 +118,9 @@ export function handleSlash(input, state) {
     case 'raw':
       state.raw = !state.raw;
       return { handled: true, note: dim(`compression → ${state.raw ? 'off (raw passthrough)' : 'on'}`) };
+    case 'vim':
+      state.vim = !state.vim;
+      return { handled: true, vim: true, note: dim(`vim keybindings → ${state.vim ? 'on (NORMAL mode)' : 'off'}`) };
     case 'reply':
       if (arg !== 'terse' && arg !== 'normal') {
         return { handled: true, note: red('usage: /reply terse|normal') };
@@ -112,11 +158,22 @@ function helpText() {
     '',
     bold('input'),
     row('Enter', 'send'),
-    row('Alt+Enter  \\ then Enter', 'newline (multi-line prompt)'),
+    row('Alt+Enter  or  \\ +Enter', 'newline (multi-line prompt)'),
     row('↑ ↓', 'history (or move between lines)'),
+    row('Ctrl+R', 'reverse-search history'),
+    row('Tab', 'complete a file path'),
+    row('@path', 'file mention with completion menu'),
+    row('!cmd', 'run a shell command locally'),
+    row('#note', 'append a note to .cw-memory.md'),
+    row('Shift+Tab', 'cycle permission mode (default/acceptEdits/plan)'),
+    row('/vim', 'toggle vim keybindings'),
+    row('type while busy', 'queued, replayed when the turn ends'),
+    row('Ctrl+← / Ctrl+→', 'move by word'),
     row('Ctrl+A / Ctrl+E', 'start / end of line'),
+    row('Ctrl+Home / Ctrl+End', 'start / end of the whole prompt'),
     row('Ctrl+U / Ctrl+K', 'delete to start / end of line'),
-    row('Ctrl+W', 'delete previous word'),
+    row('Ctrl+W / Ctrl+Backspace', 'delete previous word'),
+    row('Ctrl+Del', 'delete next word'),
     row('Ctrl+C', 'cancel a reply, or exit when the box is empty'),
   ].join('\n');
 }
@@ -138,12 +195,30 @@ export function startTui(baseOptions = {}) {
     show: baseOptions.show ?? false,
     stats: baseOptions.stats ?? true,
     sessionId: null,
+    permissionMode: baseOptions.permissionMode ?? 'default',
+    vim: false,
   };
+  const PERMISSION_MODES = ['default', 'acceptEdits', 'plan'];
 
   const editor = new LineEditor();
   const history = [];
   let historyIndex = -1; // -1 means "editing a new line"
   let draft = '';
+
+  // Slash-command autocomplete. `menuItems` is recomputed on every render from
+  // the current buffer; `menuIndex` is the highlighted row; `menuDismissed`
+  // lets Esc hide the menu until the buffer changes again.
+  let menuItems = [];
+  let menuIndex = 0;
+  let menuDismissed = false;
+  let menuKind = null; // 'slash' | 'file'
+
+  // Vim modal editing (toggled by /vim); reverse-search (Ctrl+R); and text
+  // typed while a turn is streaming, replayed into the box when it finishes.
+  const vim = createVim();
+  let searchMode = null; // { query, matches, idx, saved } while Ctrl+R is active
+  let pendingInput = '';
+  let pendingSubmit = false;
 
   // Rows the input region printed last time, and the cursor's row within it,
   // so the next redraw can return to the top and clear down.
@@ -196,9 +271,19 @@ export function startTui(baseOptions = {}) {
       }
       if (mode === 'busy') {
         // Ctrl+C or Esc interrupts the running turn; a second press force-stops.
+        // Anything else the user types is queued and replayed into the input box
+        // when the turn finishes, so composing the next message never blocks.
         for (const key of keys) {
           if ((key.type === 'ctrl' && key.key === 'c') || key.type === 'escape') {
             requestInterrupt();
+          } else if (key.type === 'text') {
+            pendingInput += key.text;
+          } else if (key.type === 'paste') {
+            pendingInput += key.text.replace(/\r\n?/g, '\n');
+          } else if (key.type === 'backspace') {
+            pendingInput = pendingInput.slice(0, -1);
+          } else if (key.type === 'enter') {
+            pendingSubmit = true; // auto-send the queued message once free
           }
         }
         return;
@@ -232,7 +317,103 @@ export function startTui(baseOptions = {}) {
       resolve();
     }
 
+    // When the autocomplete menu is showing it captures navigation keys:
+    // ↑/↓ move the highlight, Tab accepts, Esc hides it. Returns true when the
+    // key was consumed so the normal editor handling is skipped.
+    function handleMenuKey(key) {
+      if (!menuItems.length) return false;
+      switch (key.type) {
+        case 'up':
+          menuIndex = (menuIndex - 1 + menuItems.length) % menuItems.length;
+          renderInput();
+          return true;
+        case 'down':
+          menuIndex = (menuIndex + 1) % menuItems.length;
+          renderInput();
+          return true;
+        case 'tab':
+          acceptMenu();
+          return true;
+        case 'escape':
+          menuDismissed = true;
+          renderInput();
+          return true;
+        default:
+          return false;
+      }
+    }
+
+    /**
+     * What the autocomplete menu should show for the current buffer: slash
+     * commands when the line is a bare "/word", or file paths when the token at
+     * the caret is an "@mention". Empty otherwise (or when dismissed).
+     */
+    function computeMenu() {
+      if (menuDismissed) return { kind: null, items: [] };
+      const v = editor.value;
+      if (v.startsWith('/') && !/\s/.test(v.slice(1))) {
+        return { kind: 'slash', items: filterSlashCommands(v) };
+      }
+      const { token } = pathTokenAt(v, editor.cursor);
+      if (token.startsWith('@') && token.length >= 1) {
+        const { matches } = completePath(token.slice(1), process.cwd());
+        return { kind: 'file', items: matches.slice(0, 8).map((m) => ({ name: m })) };
+      }
+      return { kind: null, items: [] };
+    }
+
+    /** Accept the highlighted menu item into the buffer. */
+    function acceptMenu() {
+      const item = menuItems[menuIndex];
+      if (!item) return;
+      if (menuKind === 'slash') {
+        editor.setValue(`/${item.name} `);
+      } else if (menuKind === 'file') {
+        const { start } = pathTokenAt(editor.value, editor.cursor);
+        const before = editor.value.slice(0, start);
+        const after = editor.value.slice(editor.cursor);
+        const inserted = `@${item.name}`;
+        editor.setValue(before + inserted + after, (before + inserted).length);
+      }
+      menuDismissed = false;
+      renderInput();
+    }
+
+    /** Tab with no menu open: complete the path token at the caret in place. */
+    function completePathAtCursor() {
+      const { token, start } = pathTokenAt(editor.value, editor.cursor);
+      if (!token) return;
+      const { matches, common } = completePath(token, process.cwd());
+      if (!matches.length) return;
+      const replacement = matches.length === 1 ? matches[0] : common;
+      if (replacement === token) return;
+      const before = editor.value.slice(0, start);
+      const after = editor.value.slice(editor.cursor);
+      editor.setValue(before + replacement + after, (before + replacement).length);
+      renderInput();
+    }
+
     async function handleKey(key) {
+      // Ctrl+R reverse-history-search owns the keyboard while it is open.
+      if (searchMode) return handleSearchKey(key);
+
+      // Vim normal mode intercepts everything; insert mode only intercepts Esc
+      // and otherwise falls through to the normal editing below.
+      if (state.vim) {
+        if (vim.mode === 'normal') {
+          const r = handleVimKey(key, editor, vim);
+          if (r.submit) return submit();
+          if (r.render) renderInput();
+          return;
+        }
+        if (key.type === 'escape') { handleVimKey(key, editor, vim); return renderInput(); }
+      }
+
+      if (handleMenuKey(key)) return;
+      // Any edit to the buffer un-dismisses the menu so it can reappear.
+      if (key.type === 'text' || key.type === 'paste' || key.type === 'backspace') {
+        menuDismissed = false;
+      }
       switch (key.type) {
         case 'text':
           editor.insert(key.text);
@@ -242,7 +423,20 @@ export function startTui(baseOptions = {}) {
           editor.insert(key.text.replace(/\r\n?/g, '\n'));
           break;
         case 'enter':
+          // Backslash-continuation: a trailing "\" turns Enter into a newline,
+          // matching Claude Code's multi-line chord.
+          if (editor.value.slice(0, editor.cursor).endsWith('\\')) {
+            editor.backspace();
+            editor.newline();
+            break;
+          }
           return submit();
+        case 'tab':
+          completePathAtCursor();
+          return;
+        case 'shift-tab':
+          cyclePermissionMode();
+          break;
         case 'alt-enter':
           editor.newline();
           break;
@@ -254,10 +448,20 @@ export function startTui(baseOptions = {}) {
         case 'delete':
           editor.del();
           break;
+        case 'delete-word':
+          editor.deleteWordForward();
+          break;
+        case 'delete-word-back':
+          editor.deleteWordBack();
+          break;
         case 'left': editor.left(); break;
         case 'right': editor.right(); break;
+        case 'word-left': editor.wordLeft(); break;
+        case 'word-right': editor.wordRight(); break;
         case 'home': editor.lineStart(); break;
         case 'end': editor.lineEnd(); break;
+        case 'doc-start': editor.docStart(); break;
+        case 'doc-end': editor.docEnd(); break;
         case 'up':
           if (!editor.up()) recallHistory(-1);
           break;
@@ -287,6 +491,7 @@ export function startTui(baseOptions = {}) {
         case 'u': editor.killToLineStart(); break;
         case 'k': editor.killToLineEnd(); break;
         case 'w': editor.deleteWordBack(); break;
+        case 'r': return startReverseSearch();
         case 'l':
           stdout.write(screen.clear);
           stdout.write(`${renderBanner(state)}\n\n`);
@@ -295,6 +500,50 @@ export function startTui(baseOptions = {}) {
         default: return;
       }
       renderInput();
+    }
+
+    // --- Ctrl+R reverse-history-search ---------------------------------------
+
+    function startReverseSearch() {
+      if (!history.length) return;
+      searchMode = { query: '', matches: [], idx: 0, saved: editor.value };
+      renderInput();
+    }
+
+    function refreshSearch() {
+      const q = searchMode.query.toLowerCase();
+      // Most-recent-first, matching the readline convention.
+      searchMode.matches = q
+        ? [...history].reverse().filter((h) => h.toLowerCase().includes(q))
+        : [];
+      if (searchMode.idx >= searchMode.matches.length) searchMode.idx = 0;
+      const hit = searchMode.matches[searchMode.idx];
+      editor.setValue(hit ?? searchMode.query);
+    }
+
+    function handleSearchKey(key) {
+      if (key.type === 'text') { searchMode.query += key.text; searchMode.idx = 0; refreshSearch(); return renderInput(); }
+      if (key.type === 'backspace') { searchMode.query = searchMode.query.slice(0, -1); searchMode.idx = 0; refreshSearch(); return renderInput(); }
+      if (key.type === 'ctrl' && key.key === 'r') { // cycle to an older match
+        if (searchMode.matches.length) { searchMode.idx = (searchMode.idx + 1) % searchMode.matches.length; refreshSearch(); }
+        return renderInput();
+      }
+      if (key.type === 'enter') { searchMode = null; return renderInput(); } // keep the match, ready to send/edit
+      if (key.type === 'escape' || (key.type === 'ctrl' && key.key === 'c')) {
+        editor.setValue(searchMode.saved);
+        searchMode = null;
+        return renderInput();
+      }
+      return; // ignore other keys while searching
+    }
+
+    // --- Shift+Tab permission-mode cycle -------------------------------------
+
+    function cyclePermissionMode() {
+      const i = PERMISSION_MODES.indexOf(state.permissionMode);
+      state.permissionMode = PERMISSION_MODES[(i + 1) % PERMISSION_MODES.length];
+      // Spawn-time option: applies to the next turn (resets a live session).
+      session.configure({ permissionMode: state.permissionMode });
     }
 
     function recallHistory(direction) {
@@ -350,11 +599,24 @@ export function startTui(baseOptions = {}) {
         return finish();
       }
 
+      // "!cmd" runs a shell command locally; "#note" appends to the memory file.
+      // Neither is sent to Claude -- they mirror Claude Code's bang/hash chords.
+      if (raw.startsWith('!')) {
+        editor.clear(); historyIndex = -1;
+        history.push(raw); clearRegion();
+        return runBash(raw.slice(1).trim());
+      }
+      if (raw.startsWith('#')) {
+        editor.clear(); historyIndex = -1; clearRegion();
+        return addMemory(raw.slice(1).trim());
+      }
+
       if (raw.startsWith('/')) {
         editor.clear();
         historyIndex = -1;
         const before = { model: state.model, reply: state.reply };
         const result = handleSlash(raw, state);
+        if (result.vim) vim.mode = 'normal'; // always land in NORMAL when toggled
         const resetNote = applySessionConfig(before, result);
         clearRegion();
         if (result.clear) {
@@ -378,6 +640,42 @@ export function startTui(baseOptions = {}) {
       await runTurn(raw);
 
       if (mode !== 'edit') mode = 'edit';
+
+      // Replay anything typed while the turn was streaming, and auto-send it if
+      // the user pressed Enter during the wait.
+      if (pendingInput) { editor.setValue(pendingInput); pendingInput = ''; }
+      renderInput();
+      if (pendingSubmit) { pendingSubmit = false; if (editor.value.trim()) return submit(); }
+    }
+
+    // --- "!" shell mode and "#" memory ---------------------------------------
+
+    async function runBash(cmd) {
+      if (!cmd) return renderInput();
+      emit(accent('! ') + cmd + '\n');
+      await new Promise((res) => {
+        let child;
+        try {
+          child = spawn('sh', ['-c', cmd], { cwd: process.cwd() });
+        } catch (e) { emit(red(String(e.message)) + '\n'); return res(); }
+        child.stdout.on('data', (d) => emit(d.toString()));
+        child.stderr.on('data', (d) => emit(red(d.toString())));
+        child.on('close', (code) => { freshLine(); emit(dim(`(exit ${code})`) + '\n\n'); res(); });
+        child.on('error', (e) => { emit(red(String(e.message)) + '\n\n'); res(); });
+      });
+      atLineStart = true;
+      renderInput();
+    }
+
+    function addMemory(note) {
+      if (!note) return renderInput();
+      const path = join(process.cwd(), '.cw-memory.md');
+      try {
+        appendFileSync(path, `- ${note}\n`);
+        emit(green('# ') + dim(`saved to .cw-memory.md`) + '\n\n');
+      } catch (e) {
+        emit(red(`could not write memory: ${e.message}`) + '\n\n');
+      }
       renderInput();
     }
 
@@ -403,12 +701,26 @@ export function startTui(baseOptions = {}) {
       interruptArmed = false;
       startSpinner();
       let sawOutput = false;
+      let textBuf = '';
+
+      // Claude's answer arrives as a stream of markdown deltas. Markdown can't
+      // be rendered token-by-token (fences, lists, tables only make sense whole),
+      // so each text block is buffered and rendered when it ends -- when a tool
+      // use interrupts it, or when the turn finishes. The spinner keeps spinning
+      // meanwhile; the fully-styled block then replaces it.
+      const flushText = () => {
+        if (!textBuf.trim()) { textBuf = ''; return; }
+        stopSpinnerIfAny();
+        freshLine();
+        emit(renderMarkdown(textBuf) + '\n');
+        textBuf = '';
+      };
 
       let response;
       try {
         response = await session.send(result.prompt, {
-          onText: (text) => { sawOutput = true; emit(text); },
-          onToolUse: (tool) => { sawOutput = true; renderToolUse(tool); },
+          onText: (text) => { sawOutput = true; textBuf += text; },
+          onToolUse: (tool) => { sawOutput = true; flushText(); renderToolUse(tool); },
           onToolResult: (res) => {
             sawOutput = true;
             renderToolResult(res);
@@ -424,8 +736,11 @@ export function startTui(baseOptions = {}) {
         return;
       }
 
+      flushText();
       freshLine();
-      if (!sawOutput && response.text) emit(response.text.trim() + '\n');
+      // Fallback for the non-streaming path: the result carried text but no
+      // deltas arrived, so render it here.
+      if (!sawOutput && response.text) emit(renderMarkdown(response.text) + '\n');
       if (response.sessionId) state.sessionId = response.sessionId;
 
       if (state.stats) emit('\n' + statsLine(result, response) + '\n');
@@ -469,9 +784,13 @@ export function startTui(baseOptions = {}) {
 
     function renderToolResult(res) {
       const body = (res.content ?? '').trim();
-      const firstLine = body.split('\n')[0] ?? '';
       const mark = res.isError ? red('  ⎿ ') : dim('  ⎿ ');
-      const text = firstLine.length > 200 ? firstLine.slice(0, 200) + '…' : firstLine;
+      // Errors are worth reading verbatim (truncated); successes collapse to a
+      // short action summary so file contents / long output don't linger on the
+      // screen -- the way Claude Code reports "⎿ Read 54 lines".
+      const text = res.isError
+        ? clipLine(body.split('\n')[0] ?? '', 200)
+        : summariseResult(res.name, body);
       emit(mark + (res.isError ? red(text) : dim(text)) + '\n');
     }
 
@@ -510,7 +829,23 @@ export function startTui(baseOptions = {}) {
         const done = (value) => {
           mode = 'busy';
           permissionKeyHandler = null;
-          emit(dim(`  → ${value === 'deny' ? 'denied' : value === 'always' ? 'allowed (always)' : 'allowed'}`) + '\n\n');
+
+          // Collapse the selector: erase the "Allow this action?" line and the
+          // whole option list, then leave a single compact decision line in
+          // their place -- the way Claude Code tidies up after a choice.
+          // After draw() the cursor rests one line below the last option, so the
+          // question sits (optionRows + 1) rows up.
+          stdout.write(cursor.up(optionRows + 1));
+          stdout.write('\r' + screen.clearDown);
+          atLineStart = true;
+
+          const decision = value === 'deny'
+            ? red('✗ denied')
+            : value === 'always'
+              ? green("✓ allowed · won't ask again")
+              : green('✓ allowed');
+          emit('  ' + decision + '\n\n');
+
           startSpinner(); // tool runs / model resumes after the decision
           resolve(value);
         };
@@ -537,9 +872,12 @@ export function startTui(baseOptions = {}) {
       if (spinnerStop) return;
       const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
       let i = 0;
+      const started = Date.now();
       stdout.write(cursor.hide);
       const tick = () => {
-        stdout.write(`\r${screen.clearLine}${accent(frames[i % frames.length])} ${accent('working')}`);
+        const secs = Math.floor((Date.now() - started) / 1000);
+        const elapsed = secs > 0 ? dim(`  ${secs}s`) : '';
+        stdout.write(`\r${screen.clearLine}${accent(frames[i % frames.length])} ${accent('working')}${elapsed} ${dim('· Ctrl+C to interrupt')}`);
         i += 1;
       };
       tick();
@@ -570,17 +908,31 @@ export function startTui(baseOptions = {}) {
       const contentWidth = Math.max(8, width - 6); // "│ " + "> " + text + " │"
       const layout = layoutInput(editor.value, editor.cursor, contentWidth);
 
+      // Refresh the autocomplete menu from the current buffer.
+      const menu = computeMenu();
+      menuKind = menu.kind;
+      menuItems = menu.items;
+      if (menuIndex >= menuItems.length) menuIndex = 0;
+
       clearRegion();
 
       const out = [];
       out.push(dim('╭' + '─'.repeat(width - 2) + '╮'));
       layout.rows.forEach((text, idx) => {
-        const gutter = idx === 0 ? accent('> ') : '  ';
-        const body = gutter + text;
+        const gutter = idx === 0 ? accent('❯ ') : '  ';
+        // Empty buffer: show a dim placeholder; the cursor still parks at the
+        // start of it, exactly where typing will begin.
+        const body = (idx === 0 && editor.isEmpty)
+          ? gutter + dim('Type a message, or / for commands')
+          : gutter + text;
         out.push(dim('│') + ' ' + pad(body, width - 4) + ' ' + dim('│'));
       });
       out.push(dim('╰' + '─'.repeat(width - 2) + '╯'));
-      out.push(dim('  Enter send · Alt+Enter newline · /help'));
+      out.push(statusLine(width));
+
+      // The autocomplete dropdown renders below the status line. It sits after
+      // the cursor row, so it never disturbs cursor placement inside the box.
+      renderMenuInto(out);
 
       // Print without a trailing newline on the last row, so the hardware
       // cursor ends in a known spot we can move back from.
@@ -588,12 +940,50 @@ export function startTui(baseOptions = {}) {
 
       regionRows = out.length;
       const targetRow = 1 + layout.cursorRow; // + top border
-      const targetCol = 1 + 2 + 2 + layout.cursorCol; // "│ " + "> " + col
+      const targetCol = 1 + 2 + 2 + layout.cursorCol; // "│ " + "❯ " + col
       const upBy = (regionRows - 1) - targetRow;
       if (upBy > 0) stdout.write(cursor.up(upBy));
       stdout.write('\r');
       if (targetCol > 1) stdout.write(cursor.toColumn(targetCol));
       cursorRowInRegion = targetRow;
+    }
+
+    /** The hint + live-status line under the input box, edge-justified. */
+    function statusLine(width) {
+      if (searchMode) {
+        const hit = searchMode.matches[searchMode.idx] ?? '';
+        return dim(`  bck-i-search: `) + `\`${searchMode.query}\`` + dim(hit ? `  →  ${hit}` : '  (no match)');
+      }
+      const left = dim('⏎ send   ⌥⏎ newline   / cmds   @ files   ! bash');
+      const tokens = editor.value.trim()
+        ? `${formatTokens(estimateTokens(editor.value))} tok`
+        : '';
+      const vimTag = state.vim ? (vim.mode === 'insert' ? green('-- INSERT --') : yellow('-- NORMAL --')) : '';
+      const right = [
+        vimTag,
+        state.permissionMode !== 'default' ? state.permissionMode : '',
+        state.model ?? 'default',
+        state.raw ? red('raw') : green('compress'),
+        `lean ${leanLabel(state.lean)}`,
+        tokens,
+      ].filter(Boolean).map((s) => dim(s)).join(dim('  ·  '));
+      return justify('  ' + left, right + '  ', width);
+    }
+
+    /** Append the autocomplete rows (if any) to the render buffer. */
+    function renderMenuInto(out) {
+      if (!menuItems.length) return;
+      for (let i = 0; i < menuItems.length; i += 1) {
+        const c = menuItems[i];
+        const active = i === menuIndex;
+        const pointer = active ? accent('❯ ') : '  ';
+        const name = menuKind === 'slash' ? `/${c.name}${c.arg ? ' ' + c.arg : ''}` : c.name;
+        const label = active ? bold(name) : cyan(name);
+        const hint = menuKind === 'slash' ? dim(c.hint ?? '') : '';
+        out.push(clip('  ' + pointer + pad(label, 26) + hint, boxWidth()));
+      }
+      const legend = menuKind === 'file' ? '  ↑↓ choose · Tab/⏎ insert · Esc dismiss' : '  ↑↓ choose · Tab complete · Esc dismiss';
+      out.push(dim(legend));
     }
 
     function statsLine(result, response) {
@@ -677,6 +1067,44 @@ export function summariseInput(toolName, input = {}) {
   }
 }
 
+/**
+ * Collapse a tool result into a one-line action summary, à la Claude Code's
+ * activity log -- so a Read doesn't dump the whole file into the transcript.
+ * Content-heavy tools report a count; the rest show a trimmed first line.
+ */
+export function summariseResult(name, body = '') {
+  const text = body.trim();
+  const lines = text ? text.split('\n') : [];
+  const n = lines.length;
+  const L = (k) => `${k} line${k === 1 ? '' : 's'}`;
+
+  switch (name) {
+    case 'Read':
+      return text ? `Read ${L(n)}` : 'Read (empty file)';
+    case 'Grep':
+      return text ? `Found ${L(n)}` : 'No matches';
+    case 'Glob':
+      return text ? `Found ${n} ${n === 1 ? 'file' : 'files'}` : 'No files';
+    case 'Write':
+    case 'Edit':
+    case 'MultiEdit':
+    case 'NotebookEdit':
+      return clipLine(lines[0] ?? '') || 'Done';
+    default: {
+      // Bash and unknown tools: the first line is usually the useful bit; note
+      // how much more was hidden so nothing feels silently dropped.
+      const head = clipLine(lines[0] ?? '') || '(no output)';
+      return n > 1 ? `${head} (+${n - 1} more)` : head;
+    }
+  }
+}
+
+/** First line, hard-trimmed to `max` visible characters with an ellipsis. */
+function clipLine(line, max = 200) {
+  const s = String(line ?? '').replace(/\s+$/, '');
+  return s.length > max ? s.slice(0, max) + '…' : s;
+}
+
 function boxWidth() {
   // Span the full terminal, like Claude Code's input. One column of margin on
   // the right keeps the border off the very edge on terminals that would
@@ -696,6 +1124,18 @@ function pad(text, width) {
   if (w < width) return text + ' '.repeat(width - w);
   // Truncate on visible characters -- rare, only on a too-narrow terminal.
   return truncateVisible(text, width);
+}
+
+/** Place `left` at the start and `right` at the end of a `width`-wide line. */
+function justify(left, right, width) {
+  const gap = width - visibleWidth(left) - visibleWidth(right);
+  if (gap < 1) return clip(left, width); // too narrow: drop the status half
+  return left + ' '.repeat(gap) + right;
+}
+
+/** Truncate to a visible `width`, but never pad. */
+function clip(text, width) {
+  return visibleWidth(text) > width ? truncateVisible(text, width) : text;
 }
 
 function truncateVisible(text, width) {

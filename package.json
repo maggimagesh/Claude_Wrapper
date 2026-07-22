@@ -1,6 +1,6 @@
 {
   "name": "@magesh1211/claudecode-wrapper",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Terminal middleman for Claude Code: rewrites raw prompts into compressed caveman notation, forwards them to the local claude CLI, and reports real token savings.",
   "type": "module",
   "bin": {
@@ -33,5 +33,9 @@
     "tokens",
     "wrapper"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "marked": "^12.0.2",
+    "marked-terminal": "^7.3.0"
+  }
 }

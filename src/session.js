@@ -22,8 +22,8 @@ import { PROTOCOL } from './claude.js';
 const PERM_SERVER = fileURLToPath(new URL('./permserver.js', import.meta.url));
 
 const REPLY_STYLES = {
-  terse: 'Answer in a compact register: no preamble, no restating the request. Lead with the answer. Never abbreviate code, identifiers, paths, or commands.',
-  normal: 'Answer in normal, complete prose. The compression applies to the input only.',
+  terse: 'Be as brief as correctness allows. Lead with the answer; no preamble, no restating the request, no closing summary of what you did. Prefer short bullets over paragraphs. Summarise actions in 1-3 lines by default, expanding only if the user asks or something failed. Do not repeat file paths, commands, or diffs already shown in the terminal. Never abbreviate code, identifiers, paths, or commands, and never drop an error or required warning.',
+  normal: 'Answer in complete prose, concise and answer-first. The compression applies to the input only. Still omit filler and do not restate paths, commands, or diffs already visible.',
 };
 
 export class Session {
@@ -50,7 +50,7 @@ export class Session {
 
   start() {
     if (this.started) return;
-    const { reply = 'terse', model } = this.opts;
+    const { reply = 'terse', model, permissionMode = 'default' } = this.opts;
 
     const args = [
       '--print',
@@ -58,7 +58,7 @@ export class Session {
       '--output-format', 'stream-json',
       '--verbose',
       '--include-partial-messages',
-      '--permission-mode', 'default',
+      '--permission-mode', permissionMode,
       '--append-system-prompt', `${PROTOCOL}\n${REPLY_STYLES[reply] ?? REPLY_STYLES.terse}`,
     ];
     if (this.broker) {
@@ -90,7 +90,7 @@ export class Session {
    *   context is now lost -- the caller should say so).
    */
   configure(patch = {}) {
-    const SPAWN_KEYS = ['model', 'reply'];
+    const SPAWN_KEYS = ['model', 'reply', 'permissionMode'];
     const changed = SPAWN_KEYS.some((k) => k in patch && patch[k] !== this.opts[k]);
     Object.assign(this.opts, patch);
     if (changed && this.started) {

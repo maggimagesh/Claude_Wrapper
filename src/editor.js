@@ -111,12 +111,46 @@ export class LineEditor {
 
   deleteWordBack() {
     if (this.cursor === 0) return;
-    let i = this.cursor;
-    while (i > 0 && /\s/.test(this.value[i - 1])) i -= 1;
-    while (i > 0 && !/\s/.test(this.value[i - 1])) i -= 1;
+    const i = this.wordBoundaryBack();
     this.value = this.value.slice(0, i) + this.value.slice(this.cursor);
     this.cursor = i;
     this.goalColumn = null;
+  }
+
+  deleteWordForward() {
+    if (this.cursor >= this.value.length) return;
+    const i = this.wordBoundaryForward();
+    this.value = this.value.slice(0, this.cursor) + this.value.slice(i);
+    this.goalColumn = null;
+  }
+
+  /** Move the cursor to the start of the word to the left (Ctrl+Left). */
+  wordLeft() {
+    this.cursor = this.wordBoundaryBack();
+    this.goalColumn = null;
+  }
+
+  /** Move the cursor to the end of the word to the right (Ctrl+Right). */
+  wordRight() {
+    this.cursor = this.wordBoundaryForward();
+    this.goalColumn = null;
+  }
+
+  /** Offset of the word boundary before the cursor: skip spaces, then a word. */
+  wordBoundaryBack() {
+    let i = this.cursor;
+    while (i > 0 && /\s/.test(this.value[i - 1])) i -= 1;
+    while (i > 0 && !/\s/.test(this.value[i - 1])) i -= 1;
+    return i;
+  }
+
+  /** Offset of the word boundary after the cursor: skip spaces, then a word. */
+  wordBoundaryForward() {
+    let i = this.cursor;
+    const n = this.value.length;
+    while (i < n && /\s/.test(this.value[i])) i += 1;
+    while (i < n && !/\s/.test(this.value[i])) i += 1;
+    return i;
   }
 
   /**
