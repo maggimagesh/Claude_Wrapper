@@ -50,6 +50,16 @@ const PATTERNS = [
     kind: 'path',
     re: /\b[\w.-]+\.(?:js|mjs|cjs|jsx|ts|tsx|py|rb|go|rs|java|kt|c|h|cc|cpp|hpp|cs|php|swift|sh|bash|zsh|sql|json|jsonc|ya?ml|toml|ini|env|xml|html|css|scss|less|md|mdx|txt|lock|log|csv|proto|graphql|tf|dockerfile)\b/gi,
   },
+  // Comparative bound phrases attached to a number -- "at least 3", "up to 5",
+  // "more than 30". The comparator word is what states the direction of the
+  // bound (minimum vs. maximum, inclusive vs. exclusive); losing it to
+  // stopword removal ("at" and "up" and "than" all are stopwords) turns a
+  // precise threshold like a retry count or timeout into an ungrammatical
+  // fragment the model has to guess the direction of.
+  {
+    kind: 'bound',
+    re: /\b(?:at\s+least|at\s+most|up\s+to|no\s+more\s+than|no\s+fewer\s+than|no\s+less\s+than|more\s+than|less\s+than|fewer\s+than|greater\s+than|no\s+later\s+than|no\s+earlier\s+than)\s+\d+(?:\.\d+)?\b/gi,
+  },
   // CLI flags.
   { kind: 'flag', re: /(?:^|(?<=\s))--?[a-zA-Z][\w-]*/g },
   // Environment / constant style identifiers.

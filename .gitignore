@@ -21,3 +21,6 @@ coverage/
 
 # This project's own runtime files
 .cw-memory.md
+
+# Local session notes for Claude Code -- not for git, not for npm
+CLAUDE.md

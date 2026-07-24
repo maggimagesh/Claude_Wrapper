@@ -9,12 +9,12 @@
 
 /** Action verbs, checked against the raw prompt in priority order. */
 const ACTIONS = [
-  ['FIX', /\b(?:fix(?:ed|es|ing)?|repair|debug|broken|breaks|breaking|fail(?:s|ed|ing)?|crash(?:es|ed|ing)?|bug|regression|not\s+work\w*|doesn'?t\s+work|won'?t\s+work|throw(?:s|n|ing)?|exception|stack\s?trace|traceback|reject(?:s|ed|ing)?|hang(?:s|ing)?)\b/i],
+  ['FIX', /\b(?:fix(?:ed|es|ing)?|repair|debug|broken|breaks|breaking|fail(?:s|ed|ing)?|crash(?:es|ed|ing)?|bug|regression|not\s+work\w*|doesn'?t\s+work|won'?t\s+work|throw(?:s|n|ing)?|exception|stack\s?trace|traceback|reject(?:s|ed|ing)?|hang(?:s|ing)?|does(?:n'?t)?\s+(?:do\s+anything|respond|load)|nothing\s+happens|no\s+response|unresponsive|not\s+responding)\b/i],
   ['TEST', /\b(?:test|tests|testing|unit\s?test|spec|specs|coverage|jest|pytest|vitest|mocha|assertion)\b/i],
   ['REFACTOR', /\b(?:refactor|clean\s?up|cleanup|tidy|simplify|restructure|reorganis|reorganiz|rewrite|extract|dedupe|deduplicate|split\s+up)\b/i],
   ['OPTIMIZE', /\b(?:optimi[sz]e|faster|speed\s?up|slow|performance|perf|bottleneck|memory\s+leak|latency|n\+1)\b/i],
   ['EXPLAIN', /\b(?:explain|what\s+(?:is|are|does|do)|why\s+(?:is|are|does|do|did)|how\s+(?:does|do|is|are)|understand|walk\s+me\s+through|describe|clarify|difference\s+between|meaning\s+of)\b/i],
-  ['REVIEW', /\b(?:review|audit|critique|check\s+(?:if|whether|my|the)|look\s+over|sanity\s?check|code\s?review|is\s+this\s+(?:correct|right|good|safe))\b/i],
+  ['REVIEW', /\b(?:review|audit|critique|check\s+(?:if|whether|my|the)|look\s+over|sanity\s?check|code\s?review|is\s+(?:this|it|that)\s+(?:\w+[\s-]){0,3}?(?:correct|right|good|safe|secure|efficient|idiomatic|acceptable|ok(?:ay)?))\b/i],
   ['FIND', /\b(?:find|where\s+(?:is|are|does|do)|locate|search\s+for|which\s+file|grep|look\s+for|track\s+down)\b/i],
   ['DELETE', /\b(?:delete|remove|drop|get\s+rid\s+of|purge|uninstall|revert)\b/i],
   ['UPDATE', /\b(?:update|upgrade|bump|migrate|port|convert|rename|replace|change|modify|switch\s+to)\b/i],
@@ -34,9 +34,26 @@ const DELIVERABLES = [
   ['plan', /\b(?:plan|outline|design\s+doc|proposal)\b/i],
 ];
 
-/** Constraints worth restating verbatim -- they change what a correct answer is. */
+/**
+ * A subject pronoun/noun sitting immediately before "don't"/"never" etc. means
+ * the sentence's grammatical subject is *them* ("I dont get why", "it doesnt
+ * work", "people dont click"), not an implied "you" -- i.e. the user
+ * describing behavior, not instructing Claude. Genuine imperatives ("don't
+ * break the API") have no such subject immediately before the trigger.
+ */
+const NOT_IMPERATIVE_SUBJECT = '(?<!\\b(?:i|we|you|he|she|they|it|this|that|people|users?|someone|something)\\s)';
+
+/**
+ * Constraints worth restating verbatim -- they change what a correct answer is.
+ * Bare "no" is split from the other NO triggers (don't/never/avoid/without) and
+ * flagged `symptomGuard: true`: those other words are unambiguously imperative,
+ * but bare "no" is just as often descriptive ("no error, no response") as
+ * prohibitive ("no side effects"), and misreading the former as a rule to
+ * follow turns a bug report into nonsense instructions.
+ */
 const CONSTRAINT_PATTERNS = [
-  [/\b(?:don'?t|do\s+not|never|avoid|without|no)\s+([a-z][\w\s-]{2,60}?)(?=[,.;!?\n]|$)/gi, 'NO'],
+  [new RegExp(`${NOT_IMPERATIVE_SUBJECT}\\b(?:don'?t|do\\s+not|never|avoid|without)\\s+([a-z][\\w\\s-]{2,60}?)(?=[,.;!?\\n]|$)`, 'gi'), 'NO'],
+  [new RegExp(`${NOT_IMPERATIVE_SUBJECT}\\bno\\s+([a-z][\\w\\s-]{2,60}?)(?=[,.;!?\\n]|$)`, 'gi'), 'NO', { symptomGuard: true }],
   [/\b(?:must|has\s+to|have\s+to|needs?\s+to|required\s+to|make\s+sure\s+(?:to|that|you))\s+([a-z][\w\s-]{2,60}?)(?=[,.;!?\n]|$)/gi, 'MUST'],
   [/\bonly\s+([a-z][\w\s-]{2,60}?)(?=[,.;!?\n]|$)/gi, 'ONLY'],
   [/\b(?:keep|preserve|retain|maintain)\s+([a-z][\w\s-]{2,60}?)(?=[,.;!?\n]|$)/gi, 'KEEP'],
@@ -45,6 +62,15 @@ const CONSTRAINT_PATTERNS = [
 
 /** Constraint bodies that name nothing actionable. */
 const VAGUE = /^(?:something|anything|nothing|it|this|that|them|things?|stuff|sure|the\s+\w{1,3})$/i;
+
+/**
+ * A constraint body that talks about the *speaker's own* state of mind is the
+ * user narrating their confusion ("no duplicate email so I dont get why its
+ * saying that"), not handing Claude a rule to follow. Reusing SYMPTOM_RE
+ * catches the other shape of false positive: a bare "no" restating a symptom
+ * word already captured by hasSymptom ("no error no nothing").
+ */
+const NARRATION_RE = /\bi\s+(?:dont|don'?t|didn'?t|already|get|think|know|see|noticed|checked|found|guess)\b/i;
 
 /** Signals that the user is reporting a symptom rather than requesting a build. */
 const SYMPTOM_RE = /\b(?:error|exception|fails?|failing|crash(?:es|ed)?|hangs?|times?\s+out|returns?\s+(?:null|undefined|nothing|empty)|500|404|502|undefined|null\s+pointer|segfault|stack\s?overflow)\b/i;
@@ -66,10 +92,17 @@ export function classify(raw) {
   }
 
   const hasSymptom = SYMPTOM_RE.test(text);
+  const isQuestion = /\?/.test(text) ||
+    /^\s*(?:what|why|how|when|where|which|who|is|are|does|do|can|should|could|will|would)\b/i.test(text);
 
   // A reported symptom with no explicit verb is a bug report, not an open
   // question: "the endpoint returns null" means fix it.
   if (action === 'DO' && hasSymptom) action = 'FIX';
+  // Anything else still unclassified but phrased as a question ("is this
+  // thread safe?", "will this break callers?") is asking for an answer, not
+  // an edit -- without this, it renders as a bare, ambiguous-looking
+  // declarative fragment with no verb and no question mark.
+  else if (action === 'DO' && isQuestion) action = 'EXPLAIN';
 
   const deliverables = [];
   for (const [name, re] of DELIVERABLES) {
@@ -78,7 +111,7 @@ export function classify(raw) {
 
   const constraints = [];
   const seen = new Set();
-  for (const [re, kind] of CONSTRAINT_PATTERNS) {
+  for (const [re, kind, opts] of CONSTRAINT_PATTERNS) {
     const pattern = new RegExp(re.source, re.flags);
     let match;
     while ((match = pattern.exec(text)) !== null) {
@@ -88,6 +121,12 @@ export function classify(raw) {
       // A constraint that names nothing concrete is noise the model must still
       // read and reconcile, so it costs more than it carries.
       if (VAGUE.test(body)) continue;
+      // The user talking about their own confusion, not issuing a rule.
+      if (NARRATION_RE.test(body)) continue;
+      // Bare "no" is ambiguous between prohibitive ("no side effects") and
+      // descriptive ("no error, no response"); when the body itself reads as
+      // a symptom, it's the latter and must not become a REQ line.
+      if (opts?.symptomGuard && SYMPTOM_RE.test(body)) continue;
       seen.add(key);
       constraints.push({ kind, text: body });
       if (constraints.length >= 5) break;
@@ -99,7 +138,7 @@ export function classify(raw) {
     deliverables: deliverables.slice(0, 3),
     constraints,
     hasSymptom,
-    isQuestion: /\?/.test(text) || /^\s*(?:what|why|how|when|where|which|who|is|are|does|do|can|should|could)\b/i.test(text),
+    isQuestion,
   };
 }
 

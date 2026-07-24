@@ -86,7 +86,7 @@ export const FILLER = [
 /**
  * Grammatical glue. Dropped after filler removal.
  * Deliberately excludes: negations, coordinators (and/or/but), comparatives,
- * and question words -- all of which carry instruction.
+ * question words, and relational prepositions -- all of which carry instruction.
  */
 export const STOPWORDS = new Set([
   // Articles.
@@ -104,11 +104,9 @@ export const STOPWORDS = new Set([
   'he', 'him', 'his', 'she', 'her', 'hers',
   // Determiners and demonstratives.
   'that', 'those', 'these', 'there', 'here',
-  'some', 'any', 'each', 'every', 'either',
   // Prepositions that the model reconstructs from word order.
-  'of', 'to', 'at', 'by', 'as', 'than', 'then',
-  'from', 'into', 'onto', 'upon', 'about', 'over',
-  'out', 'up', 'down', 'off', 'in', 'on', 'for', 'with',
+  'of', 'at', 'by', 'as', 'than', 'then',
+  'about', 'for',
   // Relativisers and complementisers.
   'which', 'whose', 'whom', 'who',
   // 'if' is deliberately absent: it marks real conditional instructions
@@ -117,6 +115,40 @@ export const STOPWORDS = new Set([
   // Misc.
   'thing', 'things', 'stuff', 'something', 'anything', 'one',
 ]);
+
+/**
+ * Prepositions that state which of two nouns is the target and which is the
+ * container/source -- "delete comments FROM files" vs "delete comments files".
+ * Word order alone does not carry that relation the way it does for most
+ * prepositions, so dropping these turns a scoped instruction into a bag of
+ * nouns a tool-using model can misresolve as the more drastic reading (e.g.
+ * "delete files"). Checked before STOPWORDS, same tier as NEGATIONS.
+ */
+export const RELATIONS = new Set([
+  'from', 'into', 'onto', 'upon', 'in', 'on', 'off', 'out', 'over', 'within', 'inside',
+  // "to" states which of two names/values/paths is the target: "rename A to
+  // B", "move X to Y", "change 3 to 5" -- lose it and the direction of the
+  // edit (and which name survives) is a coin flip.
+  'to', 'with',
+  // Phrasal-verb particles. "up"/"down" are not spatial words here, they are
+  // half of the verb: "back up the database" losing "up" reads as "back db"
+  // -- not a degraded backup instruction, a missing one. Same failure for
+  // "shut down", "clean up", "roll back" (already safe: "back" isn't a
+  // stopword), "give up", "scale down".
+  'up', 'down',
+]);
+
+/**
+ * Quantifiers. These state scope -- how much of the target the instruction
+ * covers -- and word order does not reconstruct that the way it does for
+ * ordinary determiners. "remove some of the console.log statements" losing
+ * "some" reads as "remove [all of] the console.log statements": a scoped,
+ * careful request compresses into what looks like a blanket one. "every"/
+ * "each" losing their word can just as easily invert the other way, reading
+ * as a single item instead of all of them ("check every test file" ->
+ * "check test file"). Never dropped, same tier as RELATIONS.
+ */
+export const QUANTIFIERS = new Set(['some', 'any', 'each', 'every', 'either']);
 
 /**
  * Words that invert or restrict meaning. Never removed, never abbreviated.

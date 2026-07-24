@@ -57,6 +57,139 @@ test('negations are never dropped', () => {
   }
 });
 
+// --- relations: the object/container link that destructive verbs depend on --
+
+test('relational prepositions survive so scope is not lost on destructive verbs', () => {
+  // "delete comments from files" must never collapse into "delete ... files":
+  // a tool-using model reading the flattened form can misresolve it as
+  // deleting the files themselves rather than just their comments.
+  const cases = [
+    ['delete the comments from all the files', /\bfrom\b/],
+    ['remove all the comments in every file', /\bin\b/],
+    ['strip comments from src/auth.js', /\bfrom\b/],
+  ];
+  for (const [raw, expected] of cases) {
+    const { prompt } = compress(raw);
+    assert.match(prompt, expected, `lost relation in: ${raw} -> ${prompt}`);
+  }
+});
+
+test('"to"/"with" survive so rename/convert/move/range direction is not lost', () => {
+  // Dropping "to" between two names/values turns a directional edit into an
+  // unordered pair -- "rename A to B" and "rename B to A" become the same
+  // string, and a range like "10 to 20" degenerates into two bare numbers.
+  const cases = [
+    ['rename fetchUserData to getUserProfile everywhere', /\bto\b/],
+    ['delete lines 10 to 20 in auth.js', /\b10 to 20\b/],
+    ['move src/config.js to config/settings.js', /\bto\b/],
+    ['change the retry count from 3 to 5', /\bfrom 3 to 5\b/],
+    ['replace all the console.log calls with proper logging', /\bwith\b/],
+  ];
+  for (const [raw, expected] of cases) {
+    const { prompt } = compress(raw);
+    assert.match(prompt, expected, `lost direction in: ${raw} -> ${prompt}`);
+  }
+});
+
+test('quantifiers survive so scope is not silently widened or narrowed', () => {
+  // "remove SOME of the console.logs" must never read as "remove [all] the
+  // console.logs" -- dropping the quantifier turns a scoped, careful
+  // instruction into what looks like a blanket one.
+  const cases = [
+    ['remove some of the console.log statements', /\bsome\b/],
+    ['check every test file for lint issues', /\bevery\b/],
+    ['run this migration for each tenant', /\beach\b/],
+    ['delete any temp file older than a week', /\bany\b/],
+  ];
+  for (const [raw, expected] of cases) {
+    const { prompt } = compress(raw);
+    assert.match(prompt, expected, `lost scope in: ${raw} -> ${prompt}`);
+  }
+});
+
+test('comparative bound phrases keep their comparator, not just the number', () => {
+  // "at least 3" losing "at" reads as "least 3" -- direction of the bound
+  // (minimum vs. maximum) is not recoverable from the bare number.
+  const cases = [
+    ['allow at least 3 attempts', /\bat least 3\b/],
+    ['cache at most 100 entries', /\bat most 100\b/],
+    ['timeout after more than 30 seconds', /\bmore than 30\b/],
+    ['retry up to 5 times', /\bup to 5\b/],
+  ];
+  for (const [raw, expected] of cases) {
+    const { prompt } = compress(raw);
+    assert.match(prompt, expected, `lost bound in: ${raw} -> ${prompt}`);
+  }
+});
+
+test('phrasal-verb particles survive so the verb is not left dangling', () => {
+  // "back up the database" losing "up" reads as "back db" -- not a degraded
+  // backup instruction, a missing one, right before a destructive migration.
+  const cases = [
+    ['back up the database before running the migration', /\bback up\b/],
+    ['shut down the server gracefully', /\bshut down\b/],
+    ['clean up the temp directory', /\bclean up\b/],
+  ];
+  for (const [raw, expected] of cases) {
+    const { prompt } = compress(raw);
+    assert.match(prompt, expected, `lost particle in: ${raw} -> ${prompt}`);
+  }
+});
+
+test('unclassified yes/no questions keep the question mark and get EXPLAIN, not a bare fragment', () => {
+  const cases = [
+    'will this break existing callers?',
+    'does this handle the case where the list is empty?',
+    'is this code thread safe?',
+  ];
+  for (const raw of cases) {
+    const { prompt, intent } = compress(raw);
+    assert.ok(intent.action !== 'DO', `${raw} -> unclassified action, reads as a flat statement: ${prompt}`);
+    assert.match(prompt, /\?\s*$/, `lost question mark in: ${raw} -> ${prompt}`);
+  }
+});
+
+test('a subject pronoun before dont/never/no is narration, not an instruction', () => {
+  // "I dont get why" and "people dont click" describe behaviour; they must
+  // not surface as a REQ constraint telling Claude to avoid "get why" or
+  // "click it multiple times".
+  const cases = [
+    'the endpoint fails and I dont get why its returning that error',
+    'people dont click the button twice usually but maybe they are now',
+  ];
+  for (const raw of cases) {
+    const { constraints } = classify(raw);
+    assert.deepEqual(constraints, [], `false constraint from: ${raw} -> ${JSON.stringify(constraints)}`);
+  }
+  // A real imperative right after a coordinator still works.
+  const real = classify("fix the bug but don't touch the public API");
+  assert.ok(real.constraints.some((c) => c.kind === 'NO'), JSON.stringify(real.constraints));
+});
+
+// A realistic messy, multi-part, non-technical bug report + feature request.
+// Before the fix this misclassified as ADD (from a passing mention of "add a
+// spinner"), dropped the "patch" deliverable in favor of a bare "reason", and
+// hallucinated REQ lines out of symptom narration -- collectively enough to
+// make Claude only explain the bug and add a spinner, skipping the fix and
+// the requested email/redirect feature entirely.
+test('a messy multi-part bug report keeps the fix action and the patch deliverable', () => {
+  const raw = `Hey so I have this app and theres this thing where when someone clicks
+    the submit button on the signup form it doesnt really do anything sometimes,
+    like nothing happens, no error no nothing, and other times it says something
+    about email already used but I already checked the database and theres no
+    duplicate email so I dont get why its saying that, also can you make it so
+    after they sign up successfully it sends them a welcome email and redirects
+    them to the dashboard page instead of just showing a blank white screen like
+    it does now, and one more thing while youre at it could you also add a loading
+    spinner on the button so people dont click it multiple times because I think
+    that might actually be part of the problem too since maybe its submitting the
+    form more than once, thanks so much appreciate it`;
+  const { prompt, intent } = compress(raw);
+  assert.equal(intent.action, 'FIX', prompt);
+  assert.match(prompt, /^WANT .*patch/m, prompt);
+  assert.ok(!prompt.includes('\nREQ'), `phantom constraint survived: ${prompt}`);
+});
+
 // --- compression: does it actually reduce ------------------------------------
 
 test('a verbose polite prompt drops by at least 60%', () => {

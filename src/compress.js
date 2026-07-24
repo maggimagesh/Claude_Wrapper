@@ -14,7 +14,7 @@
  */
 
 import { protect, restore, isSentinel, subjectSpans } from './protect.js';
-import { FILLER, STOPWORDS, NEGATIONS, NEGATION_REWRITE, ABBREV } from './lexicon.js';
+import { FILLER, STOPWORDS, RELATIONS, QUANTIFIERS, NEGATIONS, NEGATION_REWRITE, ABBREV } from './lexicon.js';
 import { classify, defaultDeliverable } from './intent.js';
 import { estimateTokens } from './tokens.js';
 
@@ -76,6 +76,13 @@ function reduceWord(word) {
   if (NEGATION_REWRITE.has(lower)) {
     return NEGATION_REWRITE.get(lower);
   }
+  // Relational prepositions survive untouched -- dropping one turns "delete
+  // comments from files" into "delete comments files", which a tool-using
+  // model can misread as the more drastic instruction.
+  if (RELATIONS.has(lower)) return lower;
+  // Quantifiers survive untouched -- dropping one changes how much of the
+  // target the instruction covers, which word order cannot make up for.
+  if (QUANTIFIERS.has(lower)) return lower;
   if (STOPWORDS.has(lower)) return '';
   if (ABBREV.has(lower)) return ABBREV.get(lower);
 
@@ -208,6 +215,13 @@ export function compress(raw, options = {}) {
     const budget = Math.min(estimateTokens(bare) * SLOT_PREMIUM + SLOT_ALLOWANCE, before);
     prompt = estimateTokens(slotted) <= budget ? slotted : bare;
   }
+
+  // The reduce pass turns clause-ending punctuation into "; " separators, so
+  // a question mark never survives to here. Put one back on questions --
+  // without it, "will this break existing callers" reads as an assertion
+  // instead of what it is, a yes/no question.
+  if (intent.isQuestion && !/[?]\s*$/.test(prompt)) prompt = `${prompt}?`;
+
   const after = estimateTokens(prompt);
 
   return {
@@ -282,7 +296,11 @@ function renderSlots(body, intent, subjects, spans) {
     lines.push(`REQ ${restore(parts.join(' ; '), spans)}`);
   }
 
-  const want = intent.deliverables.length ? intent.deliverables : defaultDeliverable(intent.action);
+  // Union, not either/or: a coincidental keyword elsewhere in a long, messy
+  // prompt (e.g. "why" showing up in an aside) must not silently evict the
+  // action's own implied deliverable -- a FIX request that also happens to
+  // ask "why" still wants the patch, not an explanation instead of one.
+  const want = [...new Set([...defaultDeliverable(intent.action), ...intent.deliverables])].slice(0, 3);
   if (want.length) {
     lines.push(`WANT ${want.join(' + ')}`);
   }

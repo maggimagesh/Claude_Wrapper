@@ -1,5 +1,7 @@
 # claudecode-wrapper
 
+### DISCLAIMER: This is an experimental package. Do not use in real projects. USE at you rown risk.
+
 A terminal middleman for Claude Code. You type a prompt the way you'd say it to
 a colleague; the wrapper rewrites it into compressed "caveman" notation, hands
 that to your local `claude` CLI, and prints the answer back.
